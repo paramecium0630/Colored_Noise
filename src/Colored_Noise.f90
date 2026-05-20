@@ -158,7 +158,8 @@ module global_vars
     real(8), allocatable :: r(:), noise(:,:), G(:,:), Q(:,:)
 	real(8), allocatable :: inweightdegree(:), outweightdegree(:)
 
-    real(8), allocatable :: avex(:), avef(:), Ko(:,:), Ktau(:,:,:), KtauBUF(:,:)
+    real(8), allocatable :: avex(:), avef(:), Ko(:,:), eta2(:,:)
+    real(8), allocatable :: eta_tau(:,:,:), etaBUF(:,:), Ktau(:,:,:), KtauBUF(:,:)
 
     real(8), allocatable :: QschurSol(:,:), QschurWORK(:)
     real(8), allocatable :: QschurT(:,:), QschurVS(:,:), QschurWR(:), QschurWI(:)
@@ -176,7 +177,9 @@ module global_vars
     allocate(x1(N), f1(N), gau(N), gau2(N), eta1(N))
     allocate(r(N), noise(N,N))
     allocate(G(N,N), Q(N,N), inweightdegree(N), outweightdegree(N))
-    allocate(avex(N), avef(N), Ko(N,N), Ktau(N,N,MAXT_Ktau), KtauBUF(N,0:MAXT_Ktau-1))
+    allocate(avex(N), avef(N), Ko(N,N), eta2(N,N))
+    allocate(eta_tau(N,N,MAXT_Ktau),etaBUF(N,0:MAXT_Ktau-1))
+    allocate(Ktau(N,N,MAXT_Ktau),KtauBUF(N,0:MAXT_Ktau-1))
     allocate(QschurT(N,N), QschurVS(N,N), QschurSol(N,N))
     allocate(QschurWR(N), QschurWI(N), QschurWORK(max(1,8*N)), QschurBWORK(N))
     allocate(KoT(N,N))
@@ -190,9 +193,9 @@ module global_vars
     OPEN(UNIT=15, FILE='output/average/F.dat', STATUS='REPLACE')
     OPEN(UNIT=16, FILE='output/average/Ko.dat', STATUS='REPLACE')
     OPEN(UNIT=17, FILE='output/average/Ktau.dat', STATUS='REPLACE')
-
     OPEN(UNIT=18, FILE='output/solution/Lyapunov_check.dat', STATUS='unknown')
     OPEN(UNIT=19, FILE='output/solution/Ko.dat', STATUS='unknown')
+    OPEN(UNIT=20, FILE='output/solution/eta2.dat', STATUS='REPLACE')
     OPEN(UNIT=987, FILE='output/solution/trajectory_debug.dat', STATUS='REPLACE')
 
     write(6,*) repeat("=", 40)
@@ -272,8 +275,12 @@ module global_vars
         write(13,*) i, j, G(i,j)
     enddo; enddo
     
-    avex = 0d0; avef = 0d0; Ko = 0d0; Ktau = 0d0; KtauBUF = 0d0
-    i_avg=0; ITIME=0; Icount=1; jcount=0; IT=0; JTEM=0
+    avex = 0d0; avef = 0d0; Ko = 0d0
+    Ktau = 0d0; KtauBUF = 0d0
+    eta2 = 0d0; etaBUF = 0d0
+    i_avg=0; ITIME=0
+    Icount=1; jcount=0
+    IT=0; JTEM=0
 
 	mu = exp(-dt/tau_color) ! AR(1) process parameter for colored noise
 
@@ -299,20 +306,30 @@ module global_vars
             i_avg = i_avg + 1
             avex = avex + x1
             avef = avef + f1
-            DO ia=1,N; DO ib=1,N            	
-                Ko(ia,ib)=Ko(ia,ib)+x1(ia)*x1(ib)
+            DO ia=1,N; DO ib=1,N            
+                eta2(ia,ib)=eta2(ia,ib)+eta1(ia)*eta1(ib)	
+                Ko(ia,ib)=Ko(ia,ib)+x1(ia)*x1(ib)                
             ENDDO; ENDDO
+            
             IF(ITIME .LT. MAXT_Ktau) THEN
-                do ib=1,N;Ktaubuf(ib,ITIME)=X1(ib);enddo
-	  	    ELSE
+                do ib=1,N
+                    Ktaubuf(ib,ITIME)=X1(ib)
+                    etaBUF(ib,ITIME)=eta1(ib)
+                enddo	  	    
+                ELSE
                 DO IT=1,MAXT_Ktau
         	        JTEM=MOD(ITIME-IT,MAXT_Ktau)
-	       	        do ia=1,N;do ib=1,N	
+	       	        do ia=1,N                    
+                    do ib=1,N
+                    eta_tau(ia,ib,IT)=eta_tau(ia,ib,IT)+eta1(ia)*etaBUF(ib,jtem)
                     Ktau(ia,ib,IT)=Ktau(ia,ib,IT)+X1(ia)*Ktaubuf(ib,jtem)
 	       	        enddo;enddo
 	     	    ENDDO	
 	     	    JTEM=MOD(ITIME,MAXT_Ktau)	
-                do ib=1,N; Ktaubuf(ib,jtem)=X1(ib) ;enddo
+                do ib=1,N 
+                    etaBUF(ib,jtem)=eta1(ib)
+                    Ktaubuf(ib,jtem)=X1(ib)           
+                enddo                
 	            jcount=jcount+1	     
 	  	    ENDIF
         	ITIME=ITIME+1
@@ -324,6 +341,8 @@ module global_vars
     if (i_avg .le. MAXT_Ktau) stop 'Error: not enough samples to estimate Ktau. Increase runtime or reduce the lag count.'
     avex=avex/DBLE(i_avg); avef=avef/DBLE(i_avg)
     Ko=Ko/DBLE(i_avg); Ktau=Ktau/(DBLE(i_avg)-MAXT_Ktau)
+    eta2=eta2/DBLE(i_avg)
+    eta_tau=eta_tau/DBLE(i_avg-MAXT_Ktau)
 
     do ia=1,N; do ib=1,N
 	   	Ko(ia,ib)=Ko(ia,ib)-avex(ia)*avex(ib) !covariance matrix
@@ -340,13 +359,21 @@ module global_vars
 
     do i = 1, N
         write(14,*) i, avex(i)
-        write(15,*) i, avef(i)
+        write(15,*) i, avef(i)         
         do j = 1, N            
             write(17,*) i, j, Ktau(i,j,1)         
             if (i > j) cycle
             write(16,*) i, j, Ko(i,j)            
         enddo
     enddo
+    do i = 0, MAXT_Ktau
+        if (i == 0) then
+        write(20, *) 0., eta2(1,1), noise(1,1)/2/tau_color
+        else        
+        write(20, *) i*nsample*dt, eta_tau(1,1,i),&
+        & noise(1,1)/2/tau_color*dexp(-i*nsample*dt/tau_color)
+        endif
+    enddo       
 
     call build_jacobian_from_state(N, r, G, avex, Q)
 
